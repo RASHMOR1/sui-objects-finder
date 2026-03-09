@@ -1,0 +1,22 @@
+{
+  "name": "sui-object-finder-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "NODE_OPTIONS=--require=./scripts/force-wasm.cjs node node_modules/next/dist/bin/next dev",
+    "build": "NODE_OPTIONS=--require=./scripts/force-wasm.cjs node node_modules/next/dist/bin/next build",
+    "start": "NODE_OPTIONS=--require=./scripts/force-wasm.cjs node node_modules/next/dist/bin/next start"
+  },
+  "dependencies": {
+    "@next/swc-wasm-nodejs": "15.5.12",
+    "next": "15.5.12",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.10",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "typescript": "5.5.4"
+  }
+}
