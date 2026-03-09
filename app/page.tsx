@@ -7,9 +7,12 @@ import {
   useMemo,
   useRef,
   useState,
-  useTransition,
 } from "react";
 
+import {
+  normalizeObjectQuery,
+  objectMatchesObjectQuery,
+} from "@/lib/object-filter";
 import type { ObjectDataResult } from "@/lib/sui-object-data";
 import type {
   LiveObjectResult,
@@ -35,56 +38,20 @@ type ObjectDetailState =
   | { status: "loaded"; data: ObjectDataResult }
   | { status: "error"; error: string };
 
-const NETWORKS: NetworkName[] = ["testnet", "mainnet"];
+const NETWORKS: NetworkName[] = ["mainnet", "testnet"];
 const THEME_STORAGE_KEY = "sui-object-finder-theme";
-const VERSION_OBJECT_PAGE_SIZE = 10;
-
-type VersionObjectPage = {
-  objects: LiveObjectRow[];
-  nextCursor: string | null;
-  hasNextPage: boolean;
-};
+const VERSION_OBJECT_PAGE_SIZE = 50;
 
 type VersionObjectState = {
-  status: "loading" | "loaded" | "error";
-  pages: VersionObjectPage[];
-  currentPage: number;
+  status: "idle" | "loading" | "loaded" | "error";
+  objects: LiveObjectRow[];
+  hasNextPage: boolean;
+  nextCursor: string | null;
   error: string | null;
 };
 
-function normalizeVersionFilter(value: string): string | null {
-  const normalized = value.trim();
-  return normalized ? normalized : null;
-}
-
-function objectJsonContainsQuery(value: unknown, query: string): boolean {
-  if (value === null || value === undefined) {
-    return false;
-  }
-
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return String(value).toLowerCase().includes(query);
-  }
-
-  if (Array.isArray(value)) {
-    return value.some((item) => objectJsonContainsQuery(item, query));
-  }
-
-  if (typeof value === "object") {
-    return Object.entries(value).some(
-      ([key, item]) => key.toLowerCase().includes(query) || objectJsonContainsQuery(item, query),
-    );
-  }
-
-  return false;
-}
-
-function objectMatchesVersionFilter(object: LiveObjectRow, query: string | null): boolean {
-  if (!query) {
-    return true;
-  }
-
-  return objectJsonContainsQuery(object.contentsJson, query.toLowerCase());
+function formatNetworkLabel(network: NetworkName): string {
+  return network.charAt(0).toUpperCase() + network.slice(1);
 }
 
 function objectNameFromType(objectType: string | null): string {
@@ -115,23 +82,23 @@ function CopyButton({
   );
 }
 
+function LoadingIndicator({ message }: { message: string }) {
+  return (
+    <span className="loading-indicator" role="status">
+      <span aria-hidden="true" className="loading-spinner" />
+      <span>{message}</span>
+    </span>
+  );
+}
+
 export default function HomePage() {
   const [packageId, setPackageId] = useState("");
-  const [network, setNetwork] = useState<NetworkName>("testnet");
+  const [network, setNetwork] = useState<NetworkName>("mainnet");
   const [resultNetwork, setResultNetwork] = useState<NetworkName | null>(null);
-  const [sharedOnly, setSharedOnly] = useState(true);
-  const [resultSharedOnly, setResultSharedOnly] = useState<boolean | null>(null);
-  const [exactPackageOnly, setExactPackageOnly] = useState(false);
   const [result, setResult] = useState<LiveObjectResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [theme, setTheme] = useState<ThemeMode>(() => {
-    if (typeof document === "undefined") {
-      return "dark";
-    }
-
-    const currentTheme = document.documentElement.dataset.theme;
-    return currentTheme === "light" || currentTheme === "dark" ? currentTheme : "dark";
-  });
+  const [theme, setTheme] = useState<ThemeMode>("dark");
+  const [themeReady, setThemeReady] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [objectDetails, setObjectDetails] = useState<Record<string, ObjectDetailState>>({});
@@ -139,15 +106,31 @@ export default function HomePage() {
   const [versionFilterQueries, setVersionFilterQueries] = useState<Record<string, string | null>>(
     {},
   );
+  const [versionSharedOnly, setVersionSharedOnly] = useState<Record<string, boolean>>({});
   const [versionObjects, setVersionObjects] = useState<Record<string, VersionObjectState>>({});
-  const [isPending, startTransition] = useTransition();
+  const [isSearching, setIsSearching] = useState(false);
   const copyTimeoutRef = useRef<number | null>(null);
+  const networkMenuRef = useRef<HTMLDivElement | null>(null);
+  const versionRequestIdsRef = useRef<Record<string, number>>({});
+  const [isNetworkMenuOpen, setIsNetworkMenuOpen] = useState(false);
 
   useEffect(() => {
+    const currentTheme = document.documentElement.dataset.theme;
+    if (currentTheme === "light" || currentTheme === "dark") {
+      setTheme(currentTheme);
+    }
+    setThemeReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!themeReady) {
+      return;
+    }
+
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
-  }, [theme]);
+  }, [theme, themeReady]);
 
   useEffect(() => {
     return () => {
@@ -156,6 +139,32 @@ export default function HomePage() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!isNetworkMenuOpen) {
+      return;
+    }
+
+    function onPointerDown(event: MouseEvent) {
+      if (!networkMenuRef.current?.contains(event.target as Node)) {
+        setIsNetworkMenuOpen(false);
+      }
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setIsNetworkMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isNetworkMenuOpen]);
 
   const versionSections = useMemo<VersionSection[]>(() => {
     if (!result) {
@@ -227,7 +236,7 @@ export default function HomePage() {
   const loadedObjectCount = useMemo(
     () =>
       Object.values(versionObjects).reduce((count, state) => {
-        return count + state.pages.reduce((pageCount, page) => pageCount + page.objects.length, 0);
+        return count + state.objects.length;
       }, 0),
     [versionObjects],
   );
@@ -263,177 +272,163 @@ export default function HomePage() {
   }
 
   async function runSearch() {
+    setIsSearching(true);
+    setIsNetworkMenuOpen(false);
     setError(null);
+    versionRequestIdsRef.current = {};
 
-    const response = await fetch("/api/live-objects", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        packageId,
-        network,
-        sharedOnly,
-        exactPackageOnly,
-      }),
-    });
+    try {
+      const response = await fetch("/api/live-objects", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          packageId,
+          network,
+          exactPackageOnly: false,
+        }),
+      });
 
-    const payload = (await response.json()) as LiveObjectResult | { error: string };
+      const payload = (await response.json()) as LiveObjectResult | { error: string };
 
-    if (!response.ok || "error" in payload) {
-      setResult(null);
-      setResultNetwork(null);
-      setResultSharedOnly(null);
+      if (!response.ok || "error" in payload) {
+        setResult(null);
+        setResultNetwork(null);
+        setObjectDetails({});
+        setVersionFilterInputs({});
+        setVersionFilterQueries({});
+        setVersionSharedOnly({});
+        setVersionObjects({});
+        setError("error" in payload ? payload.error : "Search failed.");
+        return;
+      }
+
       setObjectDetails({});
       setVersionFilterInputs({});
       setVersionFilterQueries({});
+      setVersionSharedOnly({});
       setVersionObjects({});
-      setError("error" in payload ? payload.error : "Search failed.");
-      return;
+      setResultNetwork(network);
+      setResult(payload);
+    } finally {
+      setIsSearching(false);
     }
-
-    setObjectDetails({});
-    setVersionFilterInputs({});
-    setVersionFilterQueries({});
-    setVersionObjects({});
-    setResultNetwork(network);
-    setResultSharedOnly(sharedOnly);
-    setResult(payload);
   }
 
-  function setCurrentVersionPage(sectionKey: string, pageIndex: number) {
-    setVersionObjects((current) => {
-      const existing = current[sectionKey];
-      if (!existing || pageIndex < 0 || pageIndex >= existing.pages.length) {
-        return current;
-      }
-
-      return {
-        ...current,
-        [sectionKey]: {
-          ...existing,
-          status: existing.status === "error" ? "loaded" : existing.status,
-          currentPage: pageIndex,
-          error: null,
-        },
-      };
-    });
+  function isVersionSharedOnly(sectionKey: string): boolean {
+    return versionSharedOnly[sectionKey] ?? true;
   }
 
-  function applyVersionFilter(sectionKey: string, versionPackageId: string) {
-    const nextQuery = normalizeVersionFilter(versionFilterInputs[sectionKey] ?? "");
+  function applyVersionFilter(
+    sectionKey: string,
+    versionPackageId: string,
+    sharedOnlyOverride?: boolean,
+  ) {
+    const nextQuery = normalizeObjectQuery(versionFilterInputs[sectionKey] ?? "");
+    const nextSharedOnly = sharedOnlyOverride ?? isVersionSharedOnly(sectionKey);
 
     setVersionFilterQueries((current) => ({
       ...current,
       [sectionKey]: nextQuery,
     }));
 
+    setVersionSharedOnly((current) => ({
+      ...current,
+      [sectionKey]: nextSharedOnly,
+    }));
+
+    const nextRequestId = (versionRequestIdsRef.current[sectionKey] ?? 0) + 1;
+    versionRequestIdsRef.current[sectionKey] = nextRequestId;
+
     if (!result?.objectsOmitted) {
       return;
     }
 
-    setVersionObjects((current) => {
-      const nextState = { ...current };
-      delete nextState[sectionKey];
-      return nextState;
-    });
-
-    void loadVersionObjects(sectionKey, versionPackageId, 0, {
-      forceReset: true,
-      objectQuery: nextQuery,
-    });
-  }
-
-  async function loadVersionObjects(
-    sectionKey: string,
-    versionPackageId: string,
-    pageIndex: number,
-    options?: {
-      forceReset?: boolean;
-      objectQuery?: string | null;
-    },
-  ) {
-    const existing = options?.forceReset ? undefined : versionObjects[sectionKey];
-    if (existing?.status === "loading") {
+    const existing = versionObjects[sectionKey];
+    if (existing?.status === "loaded" && !existing.hasNextPage) {
       return;
     }
-
-    if (existing && pageIndex < existing.pages.length) {
-      setCurrentVersionPage(sectionKey, pageIndex);
-      return;
-    }
-
-    const nextPageIndex = existing?.pages.length ?? 0;
-    if (pageIndex !== nextPageIndex) {
-      return;
-    }
-
-    const previousPage = nextPageIndex > 0 ? existing?.pages[nextPageIndex - 1] : null;
-    const cursor = previousPage?.nextCursor ?? null;
-    if (nextPageIndex > 0 && !cursor) {
-      return;
-    }
-
-    const objectQuery = options?.objectQuery ?? versionFilterQueries[sectionKey] ?? null;
-    const existingPages = existing?.pages ?? [];
-    const currentPage = existing?.currentPage ?? 0;
 
     setVersionObjects((current) => ({
       ...current,
       [sectionKey]: {
         status: "loading",
-        pages: existingPages,
-        currentPage,
+        objects: [],
+        hasNextPage: true,
+        nextCursor: null,
         error: null,
       },
     }));
 
-    const response = await fetch("/api/version-objects", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        packageId: versionPackageId,
-        network: resultNetwork ?? network,
-        cursor,
-        objectQuery,
-        sharedOnly: resultSharedOnly ?? sharedOnly,
-        pageSize: VERSION_OBJECT_PAGE_SIZE,
-      }),
-    });
+    void streamVersionObjects(sectionKey, versionPackageId, nextQuery, nextSharedOnly, nextRequestId);
+  }
 
-    const payload = (await response.json()) as VersionObjectsResult | { error: string };
+  async function streamVersionObjects(
+    sectionKey: string,
+    versionPackageId: string,
+    objectQuery: string | null,
+    sharedOnly: boolean,
+    requestId: number,
+  ) {
+    let cursor: string | null = null;
+    const streamedObjects: LiveObjectRow[] = [];
 
-    if (!response.ok || "error" in payload) {
+    while (true) {
+      const response = await fetch("/api/version-objects", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          packageId: versionPackageId,
+          network: resultNetwork ?? network,
+          cursor,
+          objectQuery,
+          sharedOnly,
+          pageSize: VERSION_OBJECT_PAGE_SIZE,
+        }),
+      });
+
+      const payload = (await response.json()) as VersionObjectsResult | { error: string };
+      if (versionRequestIdsRef.current[sectionKey] !== requestId) {
+        return;
+      }
+
+      if (!response.ok || "error" in payload) {
+        setVersionObjects((current) => ({
+          ...current,
+          [sectionKey]: {
+            status: "error",
+            objects: [...streamedObjects],
+            hasNextPage: false,
+            nextCursor: null,
+            error: "error" in payload ? payload.error : "Failed to load version objects.",
+          },
+        }));
+        return;
+      }
+
+      streamedObjects.push(...payload.objects);
+      const hasNextPage = payload.hasNextPage && payload.nextCursor !== null;
+
       setVersionObjects((current) => ({
         ...current,
         [sectionKey]: {
-          status: "error",
-          pages: existingPages,
-          currentPage,
-          error: "error" in payload ? payload.error : "Failed to load version objects.",
+          status: hasNextPage ? "loading" : "loaded",
+          objects: [...streamedObjects],
+          hasNextPage,
+          nextCursor: payload.nextCursor,
+          error: null,
         },
       }));
-      return;
-    }
 
-    setVersionObjects((current) => ({
-      ...current,
-      [sectionKey]: {
-        status: "loaded",
-        pages: [
-          ...existingPages,
-          {
-            objects: payload.objects,
-            nextCursor: payload.nextCursor,
-            hasNextPage: payload.hasNextPage,
-          },
-        ],
-        currentPage: pageIndex,
-        error: null,
-      },
-    }));
+      if (!hasNextPage) {
+        return;
+      }
+
+      cursor = payload.nextCursor;
+    }
   }
 
   async function loadObjectDetail(objectId: string) {
@@ -482,9 +477,7 @@ export default function HomePage() {
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    startTransition(() => {
-      void runSearch();
-    });
+    void runSearch();
   }
 
   function onToggleTheme() {
@@ -494,7 +487,14 @@ export default function HomePage() {
   return (
     <main className="page-shell">
       <header className="topbar">
-        <span className="brand">Sui Objects</span>
+        <div className="brand-block">
+          <span className="brand">Sui Objects Finder</span>
+          {!result ? (
+            <span className="brand-subtitle">
+              Find live Sui objects from a package and its versions.
+            </span>
+          ) : null}
+        </div>
         <button
           aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
           className="theme-toggle"
@@ -517,48 +517,55 @@ export default function HomePage() {
               value={packageId}
             />
 
-            <select
-              className="search-select"
-              name="network"
-              onChange={(event) => setNetwork(event.target.value as NetworkName)}
-              value={network}
-            >
-              {NETWORKS.map((networkOption) => (
-                <option key={networkOption} value={networkOption}>
-                  {networkOption}
-                </option>
-              ))}
-            </select>
+            <div className="network-menu" ref={networkMenuRef}>
+              <button
+                aria-expanded={isNetworkMenuOpen}
+                aria-haspopup="listbox"
+                className={`search-select search-select-trigger${isNetworkMenuOpen ? " is-open" : ""}`}
+                onClick={() => {
+                  setIsNetworkMenuOpen((current) => !current);
+                }}
+                type="button"
+              >
+                <span>{formatNetworkLabel(network)}</span>
+                <span aria-hidden="true" className="search-select-caret" />
+              </button>
+
+              {isNetworkMenuOpen ? (
+                <div className="network-menu-list" role="listbox">
+                  {NETWORKS.map((networkOption) => (
+                    <button
+                      aria-selected={networkOption === network}
+                      className={`network-menu-option${networkOption === network ? " is-active" : ""}`}
+                      key={networkOption}
+                      onClick={() => {
+                        setNetwork(networkOption);
+                        setIsNetworkMenuOpen(false);
+                      }}
+                      role="option"
+                      type="button"
+                    >
+                      {formatNetworkLabel(networkOption)}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
 
             <button
-              className={`search-button${isPending ? " is-loading" : ""}`}
-              disabled={isPending}
+              className="search-button"
+              disabled={isSearching}
               type="submit"
             >
-              <span className="search-button-text">{isPending ? "Searching" : "Search"}</span>
-              <span aria-hidden="true" className="search-button-spinner" />
+              <span className="search-button-text">{isSearching ? "Searching" : "Search"}</span>
             </button>
           </div>
 
-          <div className="search-options">
-            <label className="search-option">
-              <input
-                checked={sharedOnly}
-                onChange={(event) => setSharedOnly(event.target.checked)}
-                type="checkbox"
-              />
-              <span>Shared only</span>
-            </label>
-
-            <label className="search-option">
-              <input
-                checked={exactPackageOnly}
-                onChange={(event) => setExactPackageOnly(event.target.checked)}
-                type="checkbox"
-              />
-              <span>Exact only</span>
-            </label>
-          </div>
+          {isSearching ? (
+            <div aria-live="polite" className="search-status">
+              <LoadingIndicator message="Searching package..." />
+            </div>
+          ) : null}
         </form>
       </section>
 
@@ -583,7 +590,7 @@ export default function HomePage() {
 
             <article className="summary-card">
               <span className="summary-label">Network</span>
-              <strong>{resultNetwork ?? network}</strong>
+              <strong>{formatNetworkLabel(resultNetwork ?? network)}</strong>
             </article>
 
             <article className="summary-card">
@@ -606,8 +613,8 @@ export default function HomePage() {
           {result.objectsOmitted ? (
             <section className="info-banner">
               {result.objectsOmittedReason
-                ? `${result.objectsOmittedReason} Load versions individually below, 10 objects at a time.`
-                : "Object scan skipped. Load versions individually below, 10 objects at a time."}
+                ? `${result.objectsOmittedReason} Search each version below and matching objects will appear as they are found.`
+                : "Object scan skipped. Search each version below and matching objects will appear as they are found."}
             </section>
           ) : null}
 
@@ -617,42 +624,45 @@ export default function HomePage() {
                 const versionObjectState = versionObjects[section.key];
                 const versionFilterInput = versionFilterInputs[section.key] ?? "";
                 const versionFilterQuery = versionFilterQueries[section.key] ?? null;
-                const currentPageIndex = versionObjectState?.currentPage ?? 0;
-                const currentPage = versionObjectState?.pages[currentPageIndex] ?? null;
-                const loadedPageCount = versionObjectState?.pages.length ?? 0;
-                const lastLoadedPage =
-                  loadedPageCount > 0 ? versionObjectState?.pages[loadedPageCount - 1] ?? null : null;
-                const nextPageIndex = loadedPageCount;
-                const nextPageNumber = nextPageIndex + 1;
-                const baseSectionObjects = result.objectsOmitted ? currentPage?.objects ?? [] : section.objects;
-                const sectionObjects = result.objectsOmitted
-                  ? baseSectionObjects
-                  : baseSectionObjects.filter((object) =>
-                      objectMatchesVersionFilter(object, versionFilterQuery),
-                    );
+                const sectionSharedOnly = isVersionSharedOnly(section.key);
+                const baseSectionObjects = result.objectsOmitted
+                  ? versionObjectState?.objects ?? []
+                  : section.objects;
+                const sectionObjects = baseSectionObjects.filter(
+                  (object) =>
+                    objectMatchesObjectQuery(object, versionFilterQuery) &&
+                    (!sectionSharedOnly || object.owner === "Shared"),
+                );
                 const isVersionLoading = versionObjectState?.status === "loading";
+                const hasVersionResults = versionObjectState !== undefined;
                 const versionError =
                   versionObjectState?.status === "error" ? versionObjectState.error : null;
-                const hasNextPage = lastLoadedPage?.hasNextPage ?? false;
-                const canStartVersionLoad = result.objectsOmitted && loadedPageCount === 0 && !isVersionLoading;
-                const canLoadMore = result.objectsOmitted && loadedPageCount > 0 && hasNextPage && !isVersionLoading;
                 const sectionCountLabel =
-                  result.objectsOmitted && loadedPageCount > 0
-                    ? `Page ${currentPageIndex + 1}`
-                    : isVersionLoading
-                      ? loadedPageCount > 0
-                        ? `Loading page ${nextPageNumber}`
-                        : "Loading page 1"
-                      : result.objectsOmitted
-                        ? "Not loaded"
-                        : `${sectionObjects.length} objects`;
-                const loadButtonLabel = isVersionLoading
-                  ? loadedPageCount > 0
-                    ? `Loading page ${nextPageNumber}...`
-                    : "Loading page 1..."
-                  : loadedPageCount > 0
-                    ? `${nextPageNumber}`
-                    : "1";
+                  result.objectsOmitted
+                    ? isVersionLoading
+                      ? `Loading (${sectionObjects.length})`
+                      : hasVersionResults
+                        ? `${sectionObjects.length} matches`
+                        : "Not searched"
+                    : `${sectionObjects.length} objects`;
+                const streamStatusMessage = !result.objectsOmitted
+                  ? null
+                  : isVersionLoading
+                    ? sectionObjects.length > 0
+                      ? `Loaded ${sectionObjects.length} confirmed matches. Final count still scanning...`
+                      : "Scanning this version..."
+                    : hasVersionResults
+                      ? sectionObjects.length > 0
+                        ? `Finished scanning. Found ${sectionObjects.length} matching objects.`
+                        : "Finished scanning. No matching objects found."
+                      : "Historical object scan was skipped for this package. Run a version search here.";
+                const filterButtonLabel = isVersionLoading
+                  ? "Searching..."
+                  : result.objectsOmitted
+                    ? versionFilterQuery
+                      ? "Find matches"
+                      : "Load objects"
+                    : "Filter";
 
                 return (
                   <details
@@ -716,191 +726,171 @@ export default function HomePage() {
                           placeholder="Filter this version by field value"
                           value={versionFilterInput}
                         />
+                        <label className="version-toggle">
+                          <input
+                            checked={sectionSharedOnly}
+                            onChange={(event) => {
+                              const nextSharedOnly = event.target.checked;
+                              setVersionSharedOnly((current) => ({
+                                ...current,
+                                [section.key]: nextSharedOnly,
+                              }));
+
+                              if (result.objectsOmitted && hasVersionResults) {
+                                applyVersionFilter(section.key, section.address, nextSharedOnly);
+                              }
+                            }}
+                            type="checkbox"
+                          />
+                          <span>Shared only</span>
+                        </label>
                         <button
                           className="version-filter-button"
+                          disabled={isVersionLoading}
                           onClick={() => {
                             applyVersionFilter(section.key, section.address);
                           }}
                           type="button"
                         >
-                          Filter
+                          {filterButtonLabel}
                         </button>
                       </div>
 
-                      {result.objectsOmitted && loadedPageCount === 0 ? (
-                        <div className="version-load-row">
-                          <span className="empty-state">Historical object scan skipped.</span>
-                          <button
-                            className={`load-version-button${isVersionLoading ? " is-loading" : ""}`}
-                            disabled={!canStartVersionLoad}
-                            onClick={() => {
-                              void loadVersionObjects(section.key, section.address, 0);
-                            }}
-                            type="button"
-                          >
-                            {versionError && !isVersionLoading ? "Retry page 1" : `Load page ${loadButtonLabel}`}
-                          </button>
-                        </div>
-                      ) : sectionObjects.length === 0 ? (
-                        <p className="empty-state">No objects.</p>
-                      ) : (
-                        <ul className="object-list">
-                          {sectionObjects.map((object) => {
-                        const detailState = objectDetails[object.objectId];
-                        const detailData =
-                          detailState?.status === "loaded" ? detailState.data : null;
-                        const rawFieldsJson =
-                          detailData?.fields !== null && detailData?.fields !== undefined
-                            ? JSON.stringify(detailData.fields, null, 2)
-                            : null;
-
-                        return (
-                          <li className="object-row" key={object.objectId}>
-                            <details
-                              className="object-panel"
-                              onToggle={(event) => {
-                                if (event.currentTarget.open) {
-                                  void loadObjectDetail(object.objectId);
-                                }
-                              }}
-                            >
-                              <summary className="object-summary">
-                                <div className="object-summary-main">
-                                  <span aria-hidden="true" className="object-arrow">
-                                    {"›"}
-                                  </span>
-                                  <strong className="object-name">
-                                    {objectNameFromType(object.objectType)}
-                                  </strong>
-                                </div>
-                                <div className="copy-row">
-                                  <code className="code-text">{object.objectId}</code>
-                                  <CopyButton
-                                    copied={copiedKey === `object:${object.objectId}`}
-                                    onClick={(event) => {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      void copyValue(`object:${object.objectId}`, object.objectId);
-                                    }}
-                                  />
-                                </div>
-                              </summary>
-
-                              <div className="object-details">
-                                {detailState?.status === "loading" ? (
-                                  <p className="object-status">Loading object data...</p>
-                                ) : null}
-                                {detailState?.status === "error" ? (
-                                  <p className="object-status object-status-error">
-                                    {detailState.error}
-                                  </p>
-                                ) : null}
-                                {detailData && !rawFieldsJson ? (
-                                  <p className="object-status">No raw fields.</p>
-                                ) : null}
-                                {rawFieldsJson ? (
-                                  <pre className="object-json">{rawFieldsJson}</pre>
-                                ) : null}
-                                {detailData ? (
-                                  <details className="object-more-panel">
-                                    <summary className="object-more-summary">
-                                      Click to show more
-                                    </summary>
-                                    <dl className="object-meta-list">
-                                      <div className="object-meta-row">
-                                        <dt>Type</dt>
-                                        <dd className="code-text">
-                                          {detailData.type ?? object.objectType ?? "unknown"}
-                                        </dd>
-                                      </div>
-                                      <div className="object-meta-row">
-                                        <dt>Owner</dt>
-                                        <dd>{detailData.owner ?? object.owner}</dd>
-                                      </div>
-                                      <div className="object-meta-row">
-                                        <dt>Version</dt>
-                                        <dd>{String(detailData.version ?? object.version)}</dd>
-                                      </div>
-                                      <div className="object-meta-row">
-                                        <dt>Digest</dt>
-                                        <dd className="code-text">
-                                          {detailData.digest ?? object.digest ?? "n/a"}
-                                        </dd>
-                                      </div>
-                                      <div className="object-meta-row">
-                                        <dt>Package</dt>
-                                        <dd className="code-text">{object.typePackageId}</dd>
-                                      </div>
-                                      <div className="object-meta-row">
-                                        <dt>Previous Tx</dt>
-                                        <dd className="code-text">
-                                          {detailData.previousTransaction ?? "n/a"}
-                                        </dd>
-                                      </div>
-                                      <div className="object-meta-row">
-                                        <dt>Content Type</dt>
-                                        <dd className="code-text">{detailData.contentType ?? "n/a"}</dd>
-                                      </div>
-                                      <div className="object-meta-row">
-                                        <dt>Content Data</dt>
-                                        <dd>{detailData.contentDataType ?? "n/a"}</dd>
-                                      </div>
-                                      <div className="object-meta-row">
-                                        <dt>Public Transfer</dt>
-                                        <dd>
-                                          {detailData.hasPublicTransfer === null
-                                            ? "n/a"
-                                            : String(detailData.hasPublicTransfer)}
-                                        </dd>
-                                      </div>
-                                    </dl>
-                                  </details>
-                                ) : null}
-                              </div>
-                            </details>
-                          </li>
-                        );
-                          })}
-                        </ul>
-                      )}
-                      {result.objectsOmitted && loadedPageCount > 0 ? (
-                        <div className="version-pagination">
-                          <div className="page-list">
-                            {versionObjectState?.pages.map((_, pageIndex) => (
-                              <button
-                                className={`page-chip${pageIndex === currentPageIndex ? " is-active" : ""}`}
-                                key={`${section.key}:page:${pageIndex + 1}`}
-                                onClick={() => {
-                                  setCurrentVersionPage(section.key, pageIndex);
-                                }}
-                                type="button"
-                              >
-                                {pageIndex + 1}
-                              </button>
-                            ))}
-                            {hasNextPage ? (
-                              <button
-                                className={`page-chip page-chip-next${isVersionLoading ? " is-loading" : ""}`}
-                                disabled={!canLoadMore}
-                                onClick={() => {
-                                  void loadVersionObjects(section.key, section.address, nextPageIndex);
-                                }}
-                                type="button"
-                              >
-                                {versionError && !isVersionLoading ? `${nextPageNumber}` : loadButtonLabel}
-                              </button>
-                            ) : null}
-                          </div>
-                          <span className="empty-state">
-                            Showing {sectionObjects.length} objects on page {currentPageIndex + 1}.
-                          </span>
+                      {streamStatusMessage ? (
+                        <div aria-live="polite" className="version-stream-status">
+                          {isVersionLoading ? (
+                            <LoadingIndicator message={streamStatusMessage} />
+                          ) : (
+                            <span className="empty-state">{streamStatusMessage}</span>
+                          )}
                         </div>
                       ) : null}
-                      {result.objectsOmitted &&
-                      loadedPageCount > 0 &&
-                      !hasNextPage &&
-                      currentPageIndex === loadedPageCount - 1 ? (
-                        <p className="empty-state">Last page.</p>
+
+                      {sectionObjects.length > 0 ? (
+                        <ul className="object-list">
+                          {sectionObjects.map((object) => {
+                            const detailState = objectDetails[object.objectId];
+                            const detailData =
+                              detailState?.status === "loaded" ? detailState.data : null;
+                            const rawFieldsJson =
+                              detailData?.fields !== null && detailData?.fields !== undefined
+                                ? JSON.stringify(detailData.fields, null, 2)
+                                : null;
+
+                            return (
+                              <li className="object-row" key={object.objectId}>
+                                <details
+                                  className="object-panel"
+                                  onToggle={(event) => {
+                                    if (event.currentTarget.open) {
+                                      void loadObjectDetail(object.objectId);
+                                    }
+                                  }}
+                                >
+                                  <summary className="object-summary">
+                                    <div className="object-summary-main">
+                                      <span aria-hidden="true" className="object-arrow">
+                                        {"›"}
+                                      </span>
+                                      <strong className="object-name">
+                                        {objectNameFromType(object.objectType)}
+                                      </strong>
+                                    </div>
+                                    <div className="copy-row">
+                                      <code className="code-text">{object.objectId}</code>
+                                      <CopyButton
+                                        copied={copiedKey === `object:${object.objectId}`}
+                                        onClick={(event) => {
+                                          event.preventDefault();
+                                          event.stopPropagation();
+                                          void copyValue(`object:${object.objectId}`, object.objectId);
+                                        }}
+                                      />
+                                    </div>
+                                  </summary>
+
+                                  <div className="object-details">
+                                    {detailState?.status === "loading" ? (
+                                      <p className="object-status">Loading object data...</p>
+                                    ) : null}
+                                    {detailState?.status === "error" ? (
+                                      <p className="object-status object-status-error">
+                                        {detailState.error}
+                                      </p>
+                                    ) : null}
+                                    {detailData && !rawFieldsJson ? (
+                                      <p className="object-status">No raw fields.</p>
+                                    ) : null}
+                                    {rawFieldsJson ? (
+                                      <pre className="object-json">{rawFieldsJson}</pre>
+                                    ) : null}
+                                    {detailData ? (
+                                      <details className="object-more-panel">
+                                        <summary className="object-more-summary">
+                                          Click to show more
+                                        </summary>
+                                        <dl className="object-meta-list">
+                                          <div className="object-meta-row">
+                                            <dt>Type</dt>
+                                            <dd className="code-text">
+                                              {detailData.type ?? object.objectType ?? "unknown"}
+                                            </dd>
+                                          </div>
+                                          <div className="object-meta-row">
+                                            <dt>Owner</dt>
+                                            <dd>{detailData.owner ?? object.owner}</dd>
+                                          </div>
+                                          <div className="object-meta-row">
+                                            <dt>Version</dt>
+                                            <dd>{String(detailData.version ?? object.version)}</dd>
+                                          </div>
+                                          <div className="object-meta-row">
+                                            <dt>Digest</dt>
+                                            <dd className="code-text">
+                                              {detailData.digest ?? object.digest ?? "n/a"}
+                                            </dd>
+                                          </div>
+                                          <div className="object-meta-row">
+                                            <dt>Package</dt>
+                                            <dd className="code-text">{object.typePackageId}</dd>
+                                          </div>
+                                          <div className="object-meta-row">
+                                            <dt>Previous Tx</dt>
+                                            <dd className="code-text">
+                                              {detailData.previousTransaction ?? "n/a"}
+                                            </dd>
+                                          </div>
+                                          <div className="object-meta-row">
+                                            <dt>Content Type</dt>
+                                            <dd className="code-text">
+                                              {detailData.contentType ?? "n/a"}
+                                            </dd>
+                                          </div>
+                                          <div className="object-meta-row">
+                                            <dt>Content Data</dt>
+                                            <dd>{detailData.contentDataType ?? "n/a"}</dd>
+                                          </div>
+                                          <div className="object-meta-row">
+                                            <dt>Public Transfer</dt>
+                                            <dd>
+                                              {detailData.hasPublicTransfer === null
+                                                ? "n/a"
+                                                : String(detailData.hasPublicTransfer)}
+                                            </dd>
+                                          </div>
+                                        </dl>
+                                      </details>
+                                    ) : null}
+                                  </div>
+                                </details>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      ) : !result.objectsOmitted || hasVersionResults ? (
+                        <p className="empty-state">
+                          {versionFilterQuery ? "No matching objects." : "No objects."}
+                        </p>
                       ) : null}
                       {versionError ? (
                         <p className="object-status object-status-error">{versionError}</p>

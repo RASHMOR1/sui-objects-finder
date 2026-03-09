@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   type NetworkName,
-  GraphQlError,
+  formatGraphQlErrorMessage,
   findLiveObjectsByPackage,
 } from "@/lib/sui-live-objects";
 
@@ -30,9 +30,10 @@ export async function POST(request: Request) {
   }
 
   try {
+    const network = body.network ?? "testnet";
     const result = await findLiveObjectsByPackage({
       packageId: body.packageId,
-      network: body.network ?? "testnet",
+      network,
       exactPackageOnly: body.exactPackageOnly ?? false,
       sharedOnly: body.sharedOnly ?? false,
       objectQuery: body.objectQuery,
@@ -40,10 +41,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result, { status: 200 });
   } catch (error) {
-    const message =
-      error instanceof GraphQlError || error instanceof Error
-        ? error.message
-        : "Unexpected error";
+    const message = formatGraphQlErrorMessage(error, body.network ?? "testnet");
 
     return NextResponse.json({ error: message }, { status: 400 });
   }

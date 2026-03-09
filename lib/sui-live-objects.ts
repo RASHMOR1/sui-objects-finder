@@ -1,3 +1,5 @@
+import { objectMatchesObjectQuery } from "@/lib/object-filter";
+
 export const GRAPHQL_URLS = {
   mainnet: "https://graphql.mainnet.sui.io/graphql",
   testnet: "https://graphql.testnet.sui.io/graphql",
@@ -76,6 +78,33 @@ query LivePackageObjects($type: String!, $first: Int!, $after: String) {
 }
 `;
 
+const SHARED_LIVE_OBJECTS_QUERY = `
+query SharedLivePackageObjects($type: String!, $first: Int!, $after: String) {
+  objects(first: $first, after: $after, filter: { type: $type, ownerKind: SHARED }) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      address
+      version
+      digest
+      owner {
+        __typename
+      }
+      asMoveObject {
+        contents {
+          json
+          type {
+            repr
+          }
+        }
+      }
+    }
+  }
+}
+`;
+
 const PACKAGE_VERSIONS_QUERY = `
 query PackageVersions($address: SuiAddress!, $first: Int!, $afterBefore: String, $afterAfter: String) {
   object(address: $address) {
@@ -113,11 +142,23 @@ query PackageVersions($address: SuiAddress!, $first: Int!, $afterBefore: String,
 export class GraphQlError extends Error {}
 export class ObjectHistoryLimitError extends Error {}
 
+export function formatGraphQlErrorMessage(error: unknown, network?: NetworkName): string {
+  const fallback =
+    error instanceof GraphQlError || error instanceof Error ? error.message : "Unexpected error";
+
+  if (fallback.includes("Request is outside consistent range")) {
+    const networkLabel = network ? network.charAt(0).toUpperCase() + network.slice(1) : "This";
+    return `${networkLabel} GraphQL could not return a consistent object snapshot for this package right now. Please retry later.`;
+  }
+
+  return fallback;
+}
+
 const DEFAULT_OBJECT_SCAN_PAGE_LIMIT = 8;
 const DEFAULT_OBJECT_SCAN_ROW_LIMIT = 200;
-const DEFAULT_VERSION_OBJECT_PAGE_SIZE = 10;
-const MAX_VERSION_OBJECT_PAGE_SIZE = 25;
-const VERSION_OBJECT_RAW_FETCH_PAGE_SIZE = 25;
+const DEFAULT_VERSION_OBJECT_PAGE_SIZE = 50;
+const MAX_VERSION_OBJECT_PAGE_SIZE = 100;
+const VERSION_OBJECT_RAW_FETCH_PAGE_SIZE = 50;
 const GRAPHQL_TIMEOUT_MS = 15_000;
 
 export function normalizeObjectId(value: string): string {
@@ -294,40 +335,11 @@ function isSharedOwner(owner: string): boolean {
   return owner === "Shared";
 }
 
-function normalizeObjectQuery(value: string | undefined): string | null {
-  const query = value?.trim().toLowerCase();
-  return query ? query : null;
-}
-
-function jsonContainsQuery(value: unknown, query: string): boolean {
-  if (value === null || value === undefined) {
-    return false;
-  }
-
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return String(value).toLowerCase().includes(query);
-  }
-
-  if (Array.isArray(value)) {
-    return value.some((item) => jsonContainsQuery(item, query));
-  }
-
-  if (typeof value === "object") {
-    return Object.entries(value).some(
-      ([key, item]) => key.toLowerCase().includes(query) || jsonContainsQuery(item, query),
-    );
-  }
-
-  return false;
-}
-
 function mapLiveObjectRows(
   nodes: NonNullable<LiveObjectsResponse["objects"]>["nodes"],
   typeFilter: string,
   filters?: LiveObjectFilterOptions,
 ): LiveObjectRow[] {
-  const objectQuery = normalizeObjectQuery(filters?.objectQuery);
-
   return nodes
     .map((node) => ({
       objectId: normalizeObjectId(node.address),
@@ -343,20 +355,8 @@ function mapLiveObjectRows(
         isPackageDefinedObjectType(row.objectType, typeFilter) &&
         !isSuiRelatedObjectType(row.objectType) &&
         (!filters?.sharedOnly || isSharedOwner(row.owner)) &&
-        (!objectQuery || jsonContainsQuery(row.contentsJson, objectQuery)),
+        objectMatchesObjectQuery(row, filters?.objectQuery),
     );
-}
-
-function compactLiveObjectRow(row: LiveObjectRow): LiveObjectRow {
-  return {
-    objectId: row.objectId,
-    objectType: row.objectType,
-    owner: row.owner,
-    version: row.version,
-    digest: row.digest,
-    typePackageId: row.typePackageId,
-    contentsJson: null,
-  };
 }
 
 function encodeVersionObjectCursor(state: VersionObjectCursorState): string {
@@ -376,9 +376,7 @@ function decodeVersionObjectCursor(value: string | null | undefined): VersionObj
     const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<VersionObjectCursorState>;
     return {
       rawCursor: typeof decoded.rawCursor === "string" || decoded.rawCursor === null ? decoded.rawCursor : null,
-      bufferedRows: Array.isArray(decoded.bufferedRows)
-        ? decoded.bufferedRows.map((row) => compactLiveObjectRow(row as LiveObjectRow))
-        : [],
+      bufferedRows: Array.isArray(decoded.bufferedRows) ? (decoded.bufferedRows as LiveObjectRow[]) : [],
       rawHasNextPage: typeof decoded.rawHasNextPage === "boolean" ? decoded.rawHasNextPage : true,
     };
   } catch {
@@ -492,6 +490,7 @@ export async function fetchLivePackageObjects(
 ): Promise<LiveObjectPageResult> {
   const pageSize = options?.pageSize ?? 50;
   const scanBudget = options?.scanBudget;
+  const liveObjectsQuery = options?.filters?.sharedOnly ? SHARED_LIVE_OBJECTS_QUERY : LIVE_OBJECTS_QUERY;
 
   if (scanBudget && scanBudget.remainingPages <= 0) {
     throw new ObjectHistoryLimitError(
@@ -501,7 +500,7 @@ export async function fetchLivePackageObjects(
 
   const data: LiveObjectsResponse = await graphqlCall<LiveObjectsResponse>(
     graphqlUrl,
-    LIVE_OBJECTS_QUERY,
+    liveObjectsQuery,
     {
       type: typeFilter,
       first: pageSize,
@@ -722,7 +721,7 @@ export async function findLiveObjectsByVersion(options: {
 
     rawCursor = page.nextCursor;
     rawHasNextPage = page.hasNextPage;
-    bufferedRows.push(...page.objects.map(compactLiveObjectRow));
+    bufferedRows.push(...page.objects);
   }
 
   const hasNextPage = bufferedRows.length > 0 || rawHasNextPage;
