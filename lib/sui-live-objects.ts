@@ -142,6 +142,19 @@ query PackageVersions($address: SuiAddress!, $first: Int!, $afterBefore: String,
 export class GraphQlError extends Error {}
 export class ObjectHistoryLimitError extends Error {}
 
+function describeUnexpectedUpstreamResponse(rawText: string): string {
+  const normalized = rawText.trim();
+  if (!normalized) {
+    return "The upstream service returned an empty response.";
+  }
+
+  if (/^<!doctype html/i.test(normalized) || /^<html/i.test(normalized)) {
+    return "The upstream service returned an HTML error page instead of JSON. This usually means the Sui endpoint or a gateway returned an error page.";
+  }
+
+  return `The upstream service returned an unexpected response instead of JSON: ${normalized.slice(0, 180)}`;
+}
+
 export function formatGraphQlErrorMessage(error: unknown, network?: NetworkName): string {
   const fallback =
     error instanceof GraphQlError || error instanceof Error ? error.message : "Unexpected error";
@@ -217,10 +230,22 @@ async function graphqlCall<TData>(
     clearTimeout(timeout);
   }
 
-  const payload = (await response.json()) as {
+  const rawText = await response.text();
+  let payload: {
     data?: TData;
     errors?: unknown;
   };
+
+  try {
+    payload = JSON.parse(rawText) as {
+      data?: TData;
+      errors?: unknown;
+    };
+  } catch {
+    throw new GraphQlError(
+      `GraphQL request failed with HTTP ${response.status}. ${describeUnexpectedUpstreamResponse(rawText)}`,
+    );
+  }
 
   if (!response.ok) {
     throw new GraphQlError(`GraphQL request failed with HTTP ${response.status}`);
