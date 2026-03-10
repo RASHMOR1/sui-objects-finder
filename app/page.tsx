@@ -38,6 +38,10 @@ type ObjectDetailState =
   | { status: "loaded"; data: ObjectDataResult }
   | { status: "error"; error: string };
 
+type ApiErrorPayload = {
+  error: string;
+};
+
 const NETWORKS: NetworkName[] = ["mainnet", "testnet"];
 const THEME_STORAGE_KEY = "sui-object-finder-theme";
 const VERSION_OBJECT_PAGE_SIZE = 50;
@@ -89,6 +93,47 @@ function LoadingIndicator({ message }: { message: string }) {
       <span>{message}</span>
     </span>
   );
+}
+
+function isApiErrorPayload(value: unknown): value is ApiErrorPayload {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "error" in value &&
+    typeof (value as { error?: unknown }).error === "string"
+  );
+}
+
+function describeUnexpectedApiResponse(rawText: string): string {
+  const normalized = rawText.trim();
+  if (!normalized) {
+    return "The server returned an empty response.";
+  }
+
+  if (/^<!doctype html/i.test(normalized) || /^<html/i.test(normalized)) {
+    return "The server returned an HTML error page instead of JSON. This usually means the deployment returned an error page or timed out.";
+  }
+
+  return `The server returned an unexpected response instead of JSON: ${normalized.slice(0, 180)}`;
+}
+
+async function readApiPayload<T>(response: Response, fallbackMessage: string): Promise<T | ApiErrorPayload> {
+  const rawText = await response.text();
+
+  if (!rawText.trim()) {
+    return {
+      error: response.ok ? fallbackMessage : `Request failed with HTTP ${response.status}.`,
+    };
+  }
+
+  try {
+    return JSON.parse(rawText) as T | ApiErrorPayload;
+  } catch {
+    const detail = describeUnexpectedApiResponse(rawText);
+    return {
+      error: response.ok ? `${fallbackMessage} ${detail}` : `Request failed with HTTP ${response.status}. ${detail}`,
+    };
+  }
 }
 
 function XIcon() {
@@ -312,9 +357,9 @@ export default function HomePage() {
         }),
       });
 
-      const payload = (await response.json()) as LiveObjectResult | { error: string };
+      const payload = await readApiPayload<LiveObjectResult>(response, "Search failed.");
 
-      if (!response.ok || "error" in payload) {
+      if (!response.ok || isApiErrorPayload(payload)) {
         setResult(null);
         setResultNetwork(null);
         setObjectDetails({});
@@ -322,7 +367,7 @@ export default function HomePage() {
         setVersionFilterQueries({});
         setVersionSharedOnly({});
         setVersionObjects({});
-        setError("error" in payload ? payload.error : "Search failed.");
+        setError(isApiErrorPayload(payload) ? payload.error : "Search failed.");
         return;
       }
 
@@ -397,7 +442,7 @@ export default function HomePage() {
     const streamedObjects: LiveObjectRow[] = [];
 
     while (true) {
-      const response = await fetch("/api/version-objects", {
+      const response: Response = await fetch("/api/version-objects", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -412,12 +457,15 @@ export default function HomePage() {
         }),
       });
 
-      const payload = (await response.json()) as VersionObjectsResult | { error: string };
+      const payload: VersionObjectsResult | ApiErrorPayload = await readApiPayload<VersionObjectsResult>(
+        response,
+        "Failed to load version objects.",
+      );
       if (versionRequestIdsRef.current[sectionKey] !== requestId) {
         return;
       }
 
-      if (!response.ok || "error" in payload) {
+      if (!response.ok || isApiErrorPayload(payload)) {
         setVersionObjects((current) => ({
           ...current,
           [sectionKey]: {
@@ -425,7 +473,7 @@ export default function HomePage() {
             objects: [...streamedObjects],
             hasNextPage: false,
             nextCursor: null,
-            error: "error" in payload ? payload.error : "Failed to load version objects.",
+            error: isApiErrorPayload(payload) ? payload.error : "Failed to load version objects.",
           },
         }));
         return;
@@ -475,14 +523,14 @@ export default function HomePage() {
       }),
     });
 
-    const payload = (await response.json()) as ObjectDataResult | { error: string };
+    const payload = await readApiPayload<ObjectDataResult>(response, "Failed to load object data.");
 
-    if (!response.ok || "error" in payload) {
+    if (!response.ok || isApiErrorPayload(payload)) {
       setObjectDetails((current) => ({
         ...current,
         [objectId]: {
           status: "error",
-          error: "error" in payload ? payload.error : "Failed to load object data.",
+          error: isApiErrorPayload(payload) ? payload.error : "Failed to load object data.",
         },
       }));
       return;
