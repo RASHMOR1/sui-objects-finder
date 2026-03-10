@@ -66,7 +66,11 @@ select {
 .page-shell {
   width: min(1120px, calc(100vw - 32px));
   margin: 0 auto;
-  padding: 24px 0 56px;
+  padding: 24px 0 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
 
 .topbar {
@@ -131,7 +135,8 @@ html[data-theme="light"] .theme-toggle::before {
 }
 
 .search-shell.is-empty {
-  min-height: calc(100vh - 150px);
+  flex: 1;
+  min-height: 0;
   align-items: center;
 }
 
@@ -777,6 +782,74 @@ html[data-theme="light"] .search-button {
   margin: 14px 0 0;
 }
 
+.app-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: auto;
+  padding: 12px 0 14px;
+  border-top: 1px solid var(--line);
+}
+
+.footer-copy {
+  display: flex;
+  align-items: center;
+  max-width: 640px;
+}
+
+.footer-note {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.footer-links {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.footer-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--panel-strong);
+  color: var(--text);
+  transition:
+    transform 140ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.footer-link:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent-strong);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.footer-link:active {
+  transform: translateY(1px) scale(0.985);
+}
+
+.footer-link:focus-visible {
+  outline: none;
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.footer-link svg {
+  width: 16px;
+  height: 16px;
+}
+
 @keyframes search-spin {
   to {
     transform: rotate(360deg);
@@ -796,7 +869,7 @@ html[data-theme="light"] .search-button {
 @media (max-width: 720px) {
   .page-shell {
     width: min(100vw - 20px, 100%);
-    padding-bottom: 32px;
+    padding-bottom: 0;
   }
 
   .topbar,
@@ -806,7 +879,7 @@ html[data-theme="light"] .search-button {
   }
 
   .search-shell.is-empty {
-    min-height: calc(100vh - 110px);
+    flex: 1;
   }
 
   .search-row,
@@ -827,6 +900,11 @@ html[data-theme="light"] .search-button {
   .version-main,
   .version-load-row,
   .version-pagination {
+    flex-direction: column;
+  }
+
+  .app-footer {
+    align-items: flex-start;
     flex-direction: column;
   }
 

@@ -91,6 +91,28 @@ function LoadingIndicator({ message }: { message: string }) {
   );
 }
 
+function XIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path
+        d="M18.244 2h3.308l-7.228 8.26L22.826 22h-6.655l-5.212-6.817L4.994 22H1.684l7.73-8.835L1.26 2h6.824l4.711 6.231L18.244 2Zm-1.16 18h1.833L7.088 3.895H5.122L17.084 20Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+function GitHubIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <path
+        d="M12 .5C5.649.5.5 5.649.5 12A11.5 11.5 0 0 0 8.36 22.047c.576.105.786-.25.786-.555 0-.273-.01-.996-.016-1.955-3.182.691-3.853-1.533-3.853-1.533-.52-1.322-1.271-1.674-1.271-1.674-1.039-.71.079-.696.079-.696 1.149.08 1.753 1.18 1.753 1.18 1.02 1.748 2.675 1.243 3.327.95.103-.739.399-1.243.726-1.529-2.54-.289-5.212-1.27-5.212-5.654 0-1.249.447-2.271 1.179-3.071-.118-.289-.511-1.453.112-3.03 0 0 .962-.308 3.151 1.173A10.95 10.95 0 0 1 12 6.04a10.95 10.95 0 0 1 2.87.386c2.189-1.48 3.149-1.173 3.149-1.173.625 1.577.232 2.741.114 3.03.734.8 1.178 1.822 1.178 3.071 0 4.395-2.677 5.362-5.226 5.646.41.352.776 1.045.776 2.106 0 1.521-.014 2.748-.014 3.123 0 .309.207.666.792.553A11.501 11.501 0 0 0 23.5 12C23.5 5.649 18.351.5 12 .5Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
 export default function HomePage() {
   const [packageId, setPackageId] = useState("");
   const [network, setNetwork] = useState<NetworkName>("mainnet");
@@ -903,6 +925,34 @@ export default function HomePage() {
           </section>
         </>
       ) : null}
+
+      <footer className="app-footer">
+        <div className="footer-copy">
+          <p className="footer-note">If you want to propose new features, feel free to DM.</p>
+        </div>
+        <div className="footer-links">
+          <a
+            aria-label="Message Rashmor on X"
+            className="footer-link"
+            href="https://x.com/rashmor_eth"
+            rel="noreferrer"
+            target="_blank"
+          >
+            <XIcon />
+            <span className="sr-only">X</span>
+          </a>
+          <a
+            aria-label="View the project on GitHub"
+            className="footer-link"
+            href="https://github.com/RASHMOR1/sui-objects-finder"
+            rel="noreferrer"
+            target="_blank"
+          >
+            <GitHubIcon />
+            <span className="sr-only">GitHub</span>
+          </a>
+        </div>
+      </footer>
     </main>
   );
 }

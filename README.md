@@ -1,34 +1,77 @@
 # Sui Objects Finder
 
-Find live Sui objects from a package and its versions.
+Sui Objects Finder helps you discover live Sui objects for a package and its versions without writing GraphQL by hand.
 
-## What this project does
+## Why this project exists
 
-Sui Objects Finder is a Next.js app for searching a Sui package on `mainnet` or `testnet`, listing its package versions, and loading live objects created by those versions.
+Sui stores application state in objects.
 
-It is built for cases where you want to:
+If you already know an object ID, reading that object is easy: you can paste the ID into Sui Explorer and inspect it. The hard part is usually finding the right object IDs in the first place.
 
-- inspect the versions in a package lineage
-- load live objects for a specific package version
-- filter objects by object data as results stream in
-- focus on shared objects for a specific version
-- open an object and inspect its raw fields and metadata
+On Sui, discovering the live objects that belong to a package is generally not as straightforward as reading contract state in many EVM explorers. In practice, package-scoped object discovery often means writing GraphQL queries and paging through results yourself.
+
+This app solves that problem. You give it a package ID, and it does the GraphQL querying for you.
+
+## What the app does
+
+- finds the package lineage, including older and newer package versions
+- lets you inspect objects for a specific package version
+- streams matching objects progressively as they are found
+- filters results by object metadata and JSON content
+- supports `Shared only` filtering per version
+- lets you open an object and inspect its raw fields and metadata
+- works with `mainnet` and `testnet`
+
+## What it searches
+
+The app is focused on live Move objects whose type belongs to the selected package version or package lineage.
+
+That means:
+
+- it is meant for package-defined objects
+- it is not a general transaction explorer
+- it does not track transfer history, balance history, or coin movement history
+- it filters out the SUI system coin type `0x2::sui::SUI`
+
+Important nuance:
+
+- if a package defines its own token-like or coin-like objects, those can still appear if their type belongs to that package
+- the app is about live object discovery, not historical transaction analytics
 
 ## How it works
 
-The app uses Sui GraphQL endpoints to:
+1. You enter a package ID.
+2. The app looks up the package lineage through Sui GraphQL.
+3. It lists the package versions it finds.
+4. For each version, it can query live objects whose type belongs to that package version.
+5. It lets you filter those objects without forcing you to write GraphQL manually.
 
-- look up package versions
-- scan live objects for a package or version
-- fetch object details for expanded rows
+For large package lineages, the app may skip a full upfront scan and instead let you search version by version. When that happens, matching objects are streamed into the UI as they are found.
 
-For large result sets, version object loading is streamed progressively so matching objects appear as they are found.
+## Why this is useful
 
-## Tech stack
+This project is mainly for developers, researchers, and power users who need to answer questions like:
 
-- Next.js 15
-- React 18
-- TypeScript
+- What live objects currently exist for this package?
+- Which package version do these objects belong to?
+- Which shared objects exist for this version?
+- Does any live object contain a specific value or field?
+
+## Limitations
+
+- the app depends on Sui GraphQL availability and consistency
+- some large package histories may be too expensive to scan in one pass
+- testnet can occasionally return consistency errors for object queries
+
+## Feedback and contributions
+
+If you want to propose new features, feel free to DM me on X:
+
+- [x.com/rashmor_eth](https://x.com/rashmor_eth)
+
+If you want to contribute or open issues, use GitHub:
+
+- [github.com/RASHMOR1/sui-objects-finder](https://github.com/RASHMOR1/sui-objects-finder)
 
 ## Local development
 
@@ -51,6 +94,13 @@ pnpm build
 pnpm start
 ```
 
+## Tech stack
+
+- Next.js 15
+- React 18
+- TypeScript
+- Sui GraphQL
+
 ## Project structure
 
 - `app/page.tsx`: main UI
@@ -58,10 +108,11 @@ pnpm start
 - `app/api/version-objects/route.ts`: per-version object loading API
 - `app/api/object-data/route.ts`: object detail API
 - `lib/sui-live-objects.ts`: GraphQL querying and live object scanning logic
-- `lib/object-filter.ts`: shared object filter logic
+- `lib/object-filter.ts`: shared filtering logic used by both client and server
 - `lib/sui-object-data.ts`: object detail fetching
 
 ## Notes
 
-- `mainnet` is the default network.
-- Some testnet package queries can fail when the Sui GraphQL service cannot provide a consistent snapshot. The app surfaces that as a clearer user-facing error.
+- `mainnet` is the default network
+- filtering matches object metadata and JSON content
+- per-version searches can be limited to shared objects only
