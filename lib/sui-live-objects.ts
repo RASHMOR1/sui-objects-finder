@@ -141,6 +141,9 @@ query PackageVersions($address: SuiAddress!, $first: Int!, $afterBefore: String,
 
 export class GraphQlError extends Error {}
 export class ObjectHistoryLimitError extends Error {}
+const RETRYABLE_UPSTREAM_STATUSES = new Set([429, 502, 503, 504]);
+const MAX_UPSTREAM_RETRIES = 2;
+const UPSTREAM_RETRY_BASE_DELAY_MS = 750;
 
 function describeUnexpectedUpstreamResponse(rawText: string): string {
   const normalized = rawText.trim();
@@ -153,6 +156,36 @@ function describeUnexpectedUpstreamResponse(rawText: string): string {
   }
 
   return `The upstream service returned an unexpected response instead of JSON: ${normalized.slice(0, 180)}`;
+}
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+
+  const absoluteTime = Date.parse(value);
+  if (Number.isNaN(absoluteTime)) {
+    return null;
+  }
+
+  return Math.max(absoluteTime - Date.now(), 0);
+}
+
+function retryDelayMs(response: Response, attempt: number): number {
+  return Math.min(
+    parseRetryAfterMs(response.headers.get("retry-after")) ??
+      UPSTREAM_RETRY_BASE_DELAY_MS * 2 ** attempt,
+    5000,
+  );
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function formatGraphQlErrorMessage(error: unknown, network?: NetworkName): string {
@@ -203,61 +236,74 @@ async function graphqlCall<TData>(
   query: string,
   variables: Record<string, unknown>,
 ): Promise<TData> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, GRAPHQL_TIMEOUT_MS);
+  for (let attempt = 0; attempt <= MAX_UPSTREAM_RETRIES; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, GRAPHQL_TIMEOUT_MS);
 
-  let response: Response;
+    let response: Response;
 
-  try {
-    response = await fetch(graphqlUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query, variables }),
-      cache: "no-store",
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new GraphQlError(`GraphQL request timed out after ${GRAPHQL_TIMEOUT_MS / 1000}s`);
+    try {
+      response = await fetch(graphqlUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ query, variables }),
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new GraphQlError(`GraphQL request timed out after ${GRAPHQL_TIMEOUT_MS / 1000}s`);
+      }
+
+      throw error instanceof Error
+        ? new GraphQlError(error.message)
+        : new GraphQlError("GraphQL request failed");
+    } finally {
+      clearTimeout(timeout);
     }
 
-    throw error instanceof Error ? new GraphQlError(error.message) : new GraphQlError("GraphQL request failed");
-  } finally {
-    clearTimeout(timeout);
-  }
+    const rawText = await response.text();
+    const retrySuffix = attempt > 0 ? ` after ${attempt + 1} attempts` : "";
 
-  const rawText = await response.text();
-  let payload: {
-    data?: TData;
-    errors?: unknown;
-  };
+    if (RETRYABLE_UPSTREAM_STATUSES.has(response.status) && attempt < MAX_UPSTREAM_RETRIES) {
+      await sleep(retryDelayMs(response, attempt));
+      continue;
+    }
 
-  try {
-    payload = JSON.parse(rawText) as {
+    let payload: {
       data?: TData;
       errors?: unknown;
     };
-  } catch {
-    throw new GraphQlError(
-      `GraphQL request failed with HTTP ${response.status}. ${describeUnexpectedUpstreamResponse(rawText)}`,
-    );
+
+    try {
+      payload = JSON.parse(rawText) as {
+        data?: TData;
+        errors?: unknown;
+      };
+    } catch {
+      throw new GraphQlError(
+        `GraphQL request failed with HTTP ${response.status}${retrySuffix}. ${describeUnexpectedUpstreamResponse(rawText)}`,
+      );
+    }
+
+    if (!response.ok) {
+      throw new GraphQlError(`GraphQL request failed with HTTP ${response.status}${retrySuffix}`);
+    }
+    if (payload.errors) {
+      throw new GraphQlError(`GraphQL query failed: ${JSON.stringify(payload.errors)}`);
+    }
+    if (!payload.data) {
+      throw new GraphQlError("GraphQL response did not include a data field");
+    }
+
+    return payload.data;
   }
 
-  if (!response.ok) {
-    throw new GraphQlError(`GraphQL request failed with HTTP ${response.status}`);
-  }
-  if (payload.errors) {
-    throw new GraphQlError(`GraphQL query failed: ${JSON.stringify(payload.errors)}`);
-  }
-  if (!payload.data) {
-    throw new GraphQlError("GraphQL response did not include a data field");
-  }
-
-  return payload.data;
+  throw new GraphQlError("GraphQL request failed after retries");
 }
 
 type PackageVersionsResponse = {

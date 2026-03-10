@@ -28,6 +28,9 @@ export type ObjectDataResult = {
 };
 
 export class JsonRpcError extends Error {}
+const RETRYABLE_UPSTREAM_STATUSES = new Set([429, 502, 503, 504]);
+const MAX_UPSTREAM_RETRIES = 2;
+const UPSTREAM_RETRY_BASE_DELAY_MS = 750;
 
 function describeUnexpectedUpstreamResponse(rawText: string): string {
   const normalized = rawText.trim();
@@ -40,6 +43,36 @@ function describeUnexpectedUpstreamResponse(rawText: string): string {
   }
 
   return `The upstream service returned an unexpected response instead of JSON: ${normalized.slice(0, 180)}`;
+}
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+
+  const absoluteTime = Date.parse(value);
+  if (Number.isNaN(absoluteTime)) {
+    return null;
+  }
+
+  return Math.max(absoluteTime - Date.now(), 0);
+}
+
+function retryDelayMs(response: Response, attempt: number): number {
+  return Math.min(
+    parseRetryAfterMs(response.headers.get("retry-after")) ??
+      UPSTREAM_RETRY_BASE_DELAY_MS * 2 ** attempt,
+    5000,
+  );
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function ownerToString(owner: unknown): string {
@@ -97,48 +130,59 @@ async function rpcCall<T>(
   method: string,
   params: unknown[],
 ): Promise<T> {
-  const response = await fetch(rpcUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method,
-      params,
-    }),
-    cache: "no-store",
-  });
+  for (let attempt = 0; attempt <= MAX_UPSTREAM_RETRIES; attempt += 1) {
+    const response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method,
+        params,
+      }),
+      cache: "no-store",
+    });
 
-  const rawText = await response.text();
-  let payload: {
-    result?: T;
-    error?: unknown;
-  };
+    const rawText = await response.text();
+    const retrySuffix = attempt > 0 ? ` after ${attempt + 1} attempts` : "";
 
-  try {
-    payload = JSON.parse(rawText) as {
+    if (RETRYABLE_UPSTREAM_STATUSES.has(response.status) && attempt < MAX_UPSTREAM_RETRIES) {
+      await sleep(retryDelayMs(response, attempt));
+      continue;
+    }
+
+    let payload: {
       result?: T;
       error?: unknown;
     };
-  } catch {
-    throw new JsonRpcError(
-      `${method} returned HTTP ${response.status}. ${describeUnexpectedUpstreamResponse(rawText)}`,
-    );
+
+    try {
+      payload = JSON.parse(rawText) as {
+        result?: T;
+        error?: unknown;
+      };
+    } catch {
+      throw new JsonRpcError(
+        `${method} returned HTTP ${response.status}${retrySuffix}. ${describeUnexpectedUpstreamResponse(rawText)}`,
+      );
+    }
+
+    if (!response.ok) {
+      throw new JsonRpcError(`${method} returned HTTP ${response.status}${retrySuffix}`);
+    }
+    if (payload.error) {
+      throw new JsonRpcError(`${method} failed: ${JSON.stringify(payload.error)}`);
+    }
+    if (!payload.result) {
+      throw new JsonRpcError(`${method} returned no result`);
+    }
+
+    return payload.result;
   }
 
-  if (!response.ok) {
-    throw new JsonRpcError(`${method} returned HTTP ${response.status}`);
-  }
-  if (payload.error) {
-    throw new JsonRpcError(`${method} failed: ${JSON.stringify(payload.error)}`);
-  }
-  if (!payload.result) {
-    throw new JsonRpcError(`${method} returned no result`);
-  }
-
-  return payload.result;
+  throw new JsonRpcError(`${method} failed after retries`);
 }
 
 export async function fetchObjectData(options: {
