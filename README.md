@@ -2,6 +2,8 @@
 
 Sui Objects Finder helps you discover live Sui objects for a package and its versions without writing GraphQL by hand.
 
+Available at https://sui-objects-finder.vercel.app/
+
 ## Why this project exists
 
 Sui stores application state in objects.
